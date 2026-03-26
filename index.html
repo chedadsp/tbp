@@ -50,6 +50,10 @@
     text-align: right;
     font-size: 11px;
   }
+  .ctrl-row input[type=checkbox] {
+    accent-color: #6af;
+    margin-right: 4px;
+  }
   button {
     background: rgba(255,255,255,0.06);
     color: #ccc;
@@ -81,10 +85,24 @@
     z-index: 10;
     text-align: right;
   }
+  #label-container {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 5;
+    overflow: hidden;
+  }
+  .world-label {
+    position: absolute;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    white-space: nowrap;
+    transform: translate(-50%, -50%);
+  }
 </style>
 </head>
 <body>
-<canvas id="canvas"></canvas>
 
 <div id="controls">
   <h1>Three-Body Problem</h1>
@@ -98,47 +116,291 @@
     <input type="range" id="gravity" min="0.1" max="10" step="0.1" value="1.0">
     <span class="val" id="gravityVal">1.0</span>
   </div>
+  <div class="ctrl-row">
+    <label>Follow CoM</label>
+    <input type="checkbox" id="followCoM">
+  </div>
   <div>
     <button id="btnRandomize">Randomize</button>
     <button id="btnPause">Pause</button>
+    <button id="btnResetCam">Reset Camera</button>
   </div>
 </div>
 
-<div id="info">Click & drag a body to reposition it</div>
+<div id="info">Drag body to reposition &middot; Left-drag to rotate &middot; Scroll to zoom &middot; Right-drag to pan</div>
 <div id="energy"></div>
+<div id="label-container"></div>
 
-<script>
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-
-let W, H;
-function resize() {
-  W = canvas.width = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
 }
-resize();
-window.addEventListener('resize', resize);
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // --- Configuration ---
 const COLORS = [
-  { r: 100, g: 180, b: 255 },  // blue
-  { r: 255, g: 120, b: 80 },   // orange-red
-  { r: 120, g: 255, b: 160 },  // green
+  { r: 100, g: 180, b: 255 },
+  { r: 255, g: 120, b: 80 },
+  { r: 120, g: 255, b: 160 },
 ];
 const GLOW_COLORS = ['#6ab4ff', '#ff7850', '#78ffa0'];
+const THREE_COLORS = [new THREE.Color(0x6ab4ff), new THREE.Color(0xff7850), new THREE.Color(0x78ffa0)];
 const SOFTENING = 8;
 const DT_BASE = 0.05;
 
 let bodies = [];
-let trails = [];
+let trails = [[], [], []];
 let paused = false;
 let dragging = -1;
 let G_MULT = 1;
 let currentLabel = '';
 let initialState = null;
 
+// --- Three.js Scene Setup ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000005);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000);
+camera.position.set(0, 400, 800);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 100;
+controls.maxDistance = 5000;
+controls.enablePan = true;
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- Ambient light ---
+scene.add(new THREE.AmbientLight(0x111111));
+
+// --- Glow texture generation ---
+function createGlowTexture(color, size = 128) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, `rgba(${color.r},${color.g},${color.b},0.5)`);
+  gradient.addColorStop(0.2, `rgba(${color.r},${color.g},${color.b},0.25)`);
+  gradient.addColorStop(0.5, `rgba(${color.r},${color.g},${color.b},0.06)`);
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+
+const glowTextures = COLORS.map(c => createGlowTexture(c));
+
+// --- Stars ---
+function createStarfield() {
+  const count = 500;
+  const positions = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = 2000 + Math.random() * 1500;
+    positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[i * 3 + 2] = r * Math.cos(phi);
+    sizes[i] = Math.random() * 2 + 0.5;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+  const mat = new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 2,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0.5,
+  });
+  scene.add(new THREE.Points(geo, mat));
+}
+createStarfield();
+
+// --- Body meshes ---
+const bodyGroups = [];
+const bodyMeshes = [];
+const glowSprites = [];
+const bodyLights = [];
+
+for (let i = 0; i < 3; i++) {
+  const group = new THREE.Group();
+
+  // Core sphere
+  const geo = new THREE.SphereGeometry(1, 24, 24);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const mesh = new THREE.Mesh(geo, mat);
+  group.add(mesh);
+  bodyMeshes.push(mesh);
+
+  // Glow sprite
+  const spriteMat = new THREE.SpriteMaterial({
+    map: glowTextures[i],
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(spriteMat);
+  group.add(sprite);
+  glowSprites.push(sprite);
+
+  // Point light
+  const light = new THREE.PointLight(THREE_COLORS[i], 0.4, 400);
+  group.add(light);
+  bodyLights.push(light);
+
+  scene.add(group);
+  bodyGroups.push(group);
+}
+
+// --- Trail geometries ---
+const MAX_TRAIL = 2000;
+const TRAIL_DISPLAY = 300;
+const trailLines = [];
+const trailGeos = [];
+
+for (let i = 0; i < 3; i++) {
+  const positions = new Float32Array(MAX_TRAIL * 3);
+  const colors = new Float32Array(MAX_TRAIL * 4);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+  geo.setDrawRange(0, 0);
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+  });
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  trailLines.push(line);
+  trailGeos.push(geo);
+}
+
+// --- Gravity lines ---
+const gravityLines = [];
+for (let p = 0; p < 3; p++) {
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(6);
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.06 });
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  gravityLines.push({ line, geo, mat });
+}
+
+// --- Force / velocity / acceleration arrows ---
+const arrows = [];
+// Per body: velocity (white), force from body j (2 arrows colored by j), net accel (yellow)
+const ARROW_COLORS = {
+  velocity: new THREE.Color(0xffffff),
+  accel: new THREE.Color(0xffe632),
+};
+
+for (let i = 0; i < 3; i++) {
+  // Velocity arrow
+  const vArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xffffff, 6, 3);
+  vArrow.visible = false;
+  scene.add(vArrow);
+
+  // Force arrows (from other 2 bodies)
+  const fArrows = [];
+  for (let j = 0; j < 3; j++) {
+    if (j === i) { fArrows.push(null); continue; }
+    const color = THREE_COLORS[j];
+    const arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, color, 6, 3);
+    arrow.visible = false;
+    scene.add(arrow);
+    fArrows.push(arrow);
+  }
+
+  // Net acceleration arrow
+  const aArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xffe632, 8, 4);
+  aArrow.visible = false;
+  scene.add(aArrow);
+
+  arrows.push({ v: vArrow, f: fArrows, a: aArrow });
+}
+
+// --- Reference grid (subtle) ---
+const gridHelper = new THREE.GridHelper(600, 20, 0x111122, 0x111122);
+gridHelper.position.y = -150;
+scene.add(gridHelper);
+
+// --- HTML overlay labels ---
+const labelContainer = document.getElementById('label-container');
+const massLabels = [];
+const forceLabels = [];
+const vecLabels = [];
+
+for (let i = 0; i < 3; i++) {
+  const el = document.createElement('div');
+  el.className = 'world-label';
+  el.style.color = GLOW_COLORS[i];
+  labelContainer.appendChild(el);
+  massLabels.push(el);
+}
+// velocity labels
+for (let i = 0; i < 3; i++) {
+  const el = document.createElement('div');
+  el.className = 'world-label';
+  el.style.color = 'rgba(255,255,255,0.4)';
+  labelContainer.appendChild(el);
+  vecLabels.push(el);
+}
+// net accel labels
+for (let i = 0; i < 3; i++) {
+  const el = document.createElement('div');
+  el.className = 'world-label';
+  el.style.color = 'rgba(255,230,50,0.7)';
+  el.style.fontWeight = 'bold';
+  labelContainer.appendChild(el);
+  vecLabels.push(el);
+}
+// force labels: 2 per body = 6
+for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === i) continue;
+    const el = document.createElement('div');
+    el.className = 'world-label';
+    el.style.color = `rgba(${COLORS[j].r},${COLORS[j].g},${COLORS[j].b},0.6)`;
+    labelContainer.appendChild(el);
+    forceLabels.push(el);
+  }
+}
+
+function worldToScreen(pos) {
+  const vec = pos.clone().project(camera);
+  if (vec.z > 1) return null;
+  return {
+    x: (vec.x * 0.5 + 0.5) * window.innerWidth,
+    y: (-vec.y * 0.5 + 0.5) * window.innerHeight,
+  };
+}
+
+// --- State management ---
 function saveInitialState() {
-  initialState = bodies.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, m: b.m }));
+  initialState = bodies.map(b => ({ x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz, m: b.m }));
 }
 
 function restoreInitialState() {
@@ -147,90 +409,24 @@ function restoreInitialState() {
   trails = [[], [], []];
 }
 
-function randomize() {
-  const G = 800;
-  const spread = 200;
-  // Random masses between 0.5 and 3.0
-  const masses = [
-    0.5 + Math.random() * 2.5,
-    0.5 + Math.random() * 2.5,
-    0.5 + Math.random() * 2.5,
-  ];
-  const mTotal = masses[0] + masses[1] + masses[2];
-
-  // Place bodies at random positions, ensure minimum separation
-  bodies = [];
-  for (let i = 0; i < 3; i++) {
-    let x, y, tooClose;
-    do {
-      x = (Math.random() - 0.5) * spread * 2;
-      y = (Math.random() - 0.5) * spread * 2;
-      tooClose = false;
-      for (let k = 0; k < bodies.length; k++) {
-        const d = Math.sqrt((x - bodies[k].x) ** 2 + (y - bodies[k].y) ** 2);
-        if (d < 60) { tooClose = true; break; }
-      }
-    } while (tooClose);
-    bodies.push({ x, y, vx: 0, vy: 0, m: masses[i] });
-  }
-
-  // Center of mass at origin
-  let cmx = 0, cmy = 0;
-  for (const b of bodies) { cmx += b.x * b.m; cmy += b.y * b.m; }
-  for (const b of bodies) { b.x -= cmx / mTotal; b.y -= cmy / mTotal; }
-
-  // Give each body an orbital-scale velocity (tangential to center of mass)
-  // v_orbital ~ sqrt(G * M_other / r) — ensures gravitationally bound curved orbits
-  for (let i = 0; i < 3; i++) {
-    const r = Math.sqrt(bodies[i].x ** 2 + bodies[i].y ** 2) || 1;
-    const otherMass = mTotal - bodies[i].m;
-    const vOrbit = Math.sqrt(G * otherMass / r);
-    // Tangential direction (perpendicular to radius) + radial perturbation
-    const angle = Math.atan2(bodies[i].y, bodies[i].x) + Math.PI / 2;
-    // Guarantee non-zero: minimum 40% of orbital speed
-    const speed = vOrbit * (0.4 + Math.random() * 0.6);
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    bodies[i].vx = sign * Math.cos(angle) * speed + (Math.random() - 0.5) * vOrbit * 0.3;
-    bodies[i].vy = sign * Math.sin(angle) * speed + (Math.random() - 0.5) * vOrbit * 0.3;
-  }
-
-  // Ensure every body has non-zero velocity (safety net)
-  for (const b of bodies) {
-    const v = Math.sqrt(b.vx ** 2 + b.vy ** 2);
-    if (v < 1) {
-      const a = Math.random() * Math.PI * 2;
-      b.vx = Math.cos(a) * 5;
-      b.vy = Math.sin(a) * 5;
-    }
-  }
-
-  // Zero net momentum so system stays centered
-  let px = 0, py = 0;
-  for (const b of bodies) { px += b.vx * b.m; py += b.vy * b.m; }
-  for (const b of bodies) { b.vx -= px / mTotal; b.vy -= py / mTotal; }
-
-  trails = [[], [], []];
-  currentLabel = `m: ${masses.map(m => m.toFixed(1)).join(', ')}`;
-  saveInitialState();
-}
-
-randomize();
-
-// --- Physics (Velocity Verlet) ---
+// --- Physics ---
 function computeAccelerations(bods) {
   const G = 800 * G_MULT;
-  const acc = bods.map(() => ({ ax: 0, ay: 0 }));
+  const acc = bods.map(() => ({ ax: 0, ay: 0, az: 0 }));
   for (let i = 0; i < bods.length; i++) {
     for (let j = i + 1; j < bods.length; j++) {
       const dx = bods[j].x - bods[i].x;
       const dy = bods[j].y - bods[i].y;
-      const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
+      const dz = bods[j].z - bods[i].z;
+      const distSq = dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING;
       const dist = Math.sqrt(distSq);
       const F = G / (distSq * dist);
       acc[i].ax += F * dx * bods[j].m;
       acc[i].ay += F * dy * bods[j].m;
+      acc[i].az += F * dz * bods[j].m;
       acc[j].ax -= F * dx * bods[i].m;
       acc[j].ay -= F * dy * bods[i].m;
+      acc[j].az -= F * dz * bods[i].m;
     }
   }
   return acc;
@@ -238,18 +434,19 @@ function computeAccelerations(bods) {
 
 function step(dt) {
   const acc = computeAccelerations(bodies);
-  // Half-step velocity + full-step position
   for (let i = 0; i < bodies.length; i++) {
     bodies[i].vx += acc[i].ax * dt * 0.5;
     bodies[i].vy += acc[i].ay * dt * 0.5;
+    bodies[i].vz += acc[i].az * dt * 0.5;
     bodies[i].x += bodies[i].vx * dt;
     bodies[i].y += bodies[i].vy * dt;
+    bodies[i].z += bodies[i].vz * dt;
   }
-  // New accelerations
   const acc2 = computeAccelerations(bodies);
   for (let i = 0; i < bodies.length; i++) {
     bodies[i].vx += acc2[i].ax * dt * 0.5;
     bodies[i].vy += acc2[i].ay * dt * 0.5;
+    bodies[i].vz += acc2[i].az * dt * 0.5;
   }
 }
 
@@ -257,208 +454,358 @@ function totalEnergy() {
   const G = 800 * G_MULT;
   let KE = 0, PE = 0;
   for (let i = 0; i < bodies.length; i++) {
-    KE += 0.5 * bodies[i].m * (bodies[i].vx ** 2 + bodies[i].vy ** 2);
+    KE += 0.5 * bodies[i].m * (bodies[i].vx ** 2 + bodies[i].vy ** 2 + bodies[i].vz ** 2);
     for (let j = i + 1; j < bodies.length; j++) {
       const dx = bodies[j].x - bodies[i].x;
       const dy = bodies[j].y - bodies[i].y;
-      const dist = Math.sqrt(dx * dx + dy * dy + SOFTENING * SOFTENING);
+      const dz = bodies[j].z - bodies[i].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING);
       PE -= G * bodies[i].m * bodies[j].m / dist;
     }
   }
   return { KE, PE, total: KE + PE };
 }
 
-// --- Rendering ---
-function drawTrail(trail, color, maxLen) {
-  if (trail.length < 2) return;
-  const start = Math.max(0, trail.length - maxLen);
-  for (let i = start + 1; i < trail.length; i++) {
-    const alpha = (i - start) / (trail.length - start);
-    ctx.beginPath();
-    ctx.moveTo(trail[i - 1].x + W / 2, trail[i - 1].y + H / 2);
-    ctx.lineTo(trail[i].x + W / 2, trail[i].y + H / 2);
-    ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${alpha * 0.6})`;
-    ctx.lineWidth = 1 + alpha * 1.5;
-    ctx.stroke();
+// --- Randomize ---
+function randomize() {
+  const G = 800;
+  const spread = 200;
+  const zSpread = 120;
+  const masses = [
+    0.5 + Math.random() * 2.5,
+    0.5 + Math.random() * 2.5,
+    0.5 + Math.random() * 2.5,
+  ];
+  const mTotal = masses[0] + masses[1] + masses[2];
+
+  bodies = [];
+  for (let i = 0; i < 3; i++) {
+    let x, y, z, tooClose;
+    do {
+      x = (Math.random() - 0.5) * spread * 2;
+      y = (Math.random() - 0.5) * spread * 2;
+      z = (Math.random() - 0.5) * zSpread * 2;
+      tooClose = false;
+      for (let k = 0; k < bodies.length; k++) {
+        const d = Math.sqrt((x - bodies[k].x) ** 2 + (y - bodies[k].y) ** 2 + (z - bodies[k].z) ** 2);
+        if (d < 60) { tooClose = true; break; }
+      }
+    } while (tooClose);
+    bodies.push({ x, y, z, vx: 0, vy: 0, vz: 0, m: masses[i] });
   }
-}
 
-function drawBody(b, idx) {
-  const cx = b.x + W / 2;
-  const cy = b.y + H / 2;
-  const radius = 4 + b.m * 4;
+  // Center of mass at origin
+  let cmx = 0, cmy = 0, cmz = 0;
+  for (const b of bodies) { cmx += b.x * b.m; cmy += b.y * b.m; cmz += b.z * b.m; }
+  for (const b of bodies) { b.x -= cmx / mTotal; b.y -= cmy / mTotal; b.z -= cmz / mTotal; }
 
-  // Outer glow
-  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 8);
-  grad.addColorStop(0, GLOW_COLORS[idx] + '44');
-  grad.addColorStop(0.4, GLOW_COLORS[idx] + '11');
-  grad.addColorStop(1, 'transparent');
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius * 8, 0, Math.PI * 2);
-  ctx.fillStyle = grad;
-  ctx.fill();
+  // 3D orbital velocities using cross product for tangential direction
+  for (let i = 0; i < 3; i++) {
+    const r = Math.sqrt(bodies[i].x ** 2 + bodies[i].y ** 2 + bodies[i].z ** 2) || 1;
+    const otherMass = mTotal - bodies[i].m;
+    const vOrbit = Math.sqrt(G * otherMass / r);
 
-  // Inner glow
-  const grad2 = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 2.5);
-  grad2.addColorStop(0, '#fff');
-  grad2.addColorStop(0.3, GLOW_COLORS[idx]);
-  grad2.addColorStop(1, 'transparent');
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius * 2.5, 0, Math.PI * 2);
-  ctx.fillStyle = grad2;
-  ctx.fill();
+    // Position unit vector
+    const px = bodies[i].x / r, py = bodies[i].y / r, pz = bodies[i].z / r;
 
-  // Core
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.fillStyle = '#fff';
-  ctx.fill();
-}
+    // Random axis for cross product (avoid parallel to position)
+    let ax = Math.random() - 0.5, ay = Math.random() - 0.5, az = Math.random() - 0.5;
+    const alen = Math.sqrt(ax * ax + ay * ay + az * az) || 1;
+    ax /= alen; ay /= alen; az /= alen;
 
-function drawGravityLines() {
-  for (let i = 0; i < bodies.length; i++) {
-    for (let j = i + 1; j < bodies.length; j++) {
-      const dx = bodies[j].x - bodies[i].x;
-      const dy = bodies[j].y - bodies[i].y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const alpha = Math.max(0.02, Math.min(0.12, 200 / dist));
-      ctx.beginPath();
-      ctx.moveTo(bodies[i].x + W / 2, bodies[i].y + H / 2);
-      ctx.lineTo(bodies[j].x + W / 2, bodies[j].y + H / 2);
-      ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
+    // Cross product: tangent = position × randomAxis
+    let tx = py * az - pz * ay;
+    let ty = pz * ax - px * az;
+    let tz = px * ay - py * ax;
+    let tlen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+
+    // If nearly parallel, use a different axis
+    if (tlen < 0.1) {
+      ax = 0; ay = 1; az = 0;
+      tx = py * az - pz * ay;
+      ty = pz * ax - px * az;
+      tz = px * ay - py * ax;
+      tlen = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+    }
+    tx /= tlen; ty /= tlen; tz /= tlen;
+
+    const speed = vOrbit * (0.4 + Math.random() * 0.6);
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    const perturb = vOrbit * 0.3;
+    bodies[i].vx = sign * tx * speed + (Math.random() - 0.5) * perturb;
+    bodies[i].vy = sign * ty * speed + (Math.random() - 0.5) * perturb;
+    bodies[i].vz = sign * tz * speed + (Math.random() - 0.5) * perturb;
+  }
+
+  // Ensure non-zero velocity
+  for (const b of bodies) {
+    const v = Math.sqrt(b.vx ** 2 + b.vy ** 2 + b.vz ** 2);
+    if (v < 1) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      b.vx = Math.sin(phi) * Math.cos(theta) * 5;
+      b.vy = Math.sin(phi) * Math.sin(theta) * 5;
+      b.vz = Math.cos(phi) * 5;
     }
   }
+
+  // Zero net momentum
+  let px2 = 0, py2 = 0, pz2 = 0;
+  for (const b of bodies) { px2 += b.vx * b.m; py2 += b.vy * b.m; pz2 += b.vz * b.m; }
+  for (const b of bodies) { b.vx -= px2 / mTotal; b.vy -= py2 / mTotal; b.vz -= pz2 / mTotal; }
+
+  trails = [[], [], []];
+  currentLabel = `m: ${masses.map(m => m.toFixed(1)).join(', ')}`;
+  saveInitialState();
+  updateBodyMeshes();
 }
 
-function drawArrow(x1, y1, x2, y2, color, alpha, width) {
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(x2, y2);
-  ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${alpha})`;
-  ctx.lineWidth = width;
-  ctx.stroke();
-  // Arrowhead
-  const dx = x2 - x1, dy = y2 - y1;
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (len < 4) return;
-  const headLen = Math.min(10, len * 0.35);
-  const angle = Math.atan2(dy, dx);
-  ctx.beginPath();
-  ctx.moveTo(x2, y2);
-  ctx.lineTo(x2 - headLen * Math.cos(angle - 0.45), y2 - headLen * Math.sin(angle - 0.45));
-  ctx.lineTo(x2 - headLen * Math.cos(angle + 0.45), y2 - headLen * Math.sin(angle + 0.45));
-  ctx.closePath();
-  ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${alpha})`;
-  ctx.fill();
-}
-
-// Draw per-body: velocity vector, individual force from each other body, net acceleration
-function drawForceVectors() {
-  const G = 800 * G_MULT;
-  const F_SCALE = 0.08;  // force to pixels
-  const A_SCALE = 12;    // acceleration to pixels
-  const V_SCALE = 0.6;   // velocity to pixels
-  const MAX_LEN = 140;
-
-  for (let i = 0; i < bodies.length; i++) {
-    const cx = bodies[i].x + W / 2;
-    const cy = bodies[i].y + H / 2;
+function updateBodyMeshes() {
+  for (let i = 0; i < 3; i++) {
     const radius = 4 + bodies[i].m * 4;
+    bodyMeshes[i].scale.setScalar(radius);
+    glowSprites[i].scale.setScalar(radius * 16);
+  }
+}
 
-    // --- Velocity vector (white, dashed-style) ---
-    const vLen = Math.min(Math.sqrt(bodies[i].vx ** 2 + bodies[i].vy ** 2) * V_SCALE, MAX_LEN);
-    if (vLen > 2) {
-      const vNorm = Math.sqrt(bodies[i].vx ** 2 + bodies[i].vy ** 2) || 1;
-      const vex = cx + (bodies[i].vx / vNorm) * vLen;
-      const vey = cy + (bodies[i].vy / vNorm) * vLen;
-      drawArrow(cx, cy, vex, vey, { r: 255, g: 255, b: 255 }, 0.35, 1.5);
-      ctx.font = '9px Courier New';
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.fillText('v', vex + 4, vey - 4);
+randomize();
+
+// --- Auto-reset check ---
+let allFarSince = 0;
+function allBodiesFar() {
+  for (const b of bodies) {
+    const d = Math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    if (d < 2000) return false;
+  }
+  return true;
+}
+
+// --- Update rendering ---
+function updateTrails() {
+  for (let i = 0; i < 3; i++) {
+    const trail = trails[i];
+    const geo = trailGeos[i];
+    const posAttr = geo.attributes.position;
+    const colAttr = geo.attributes.color;
+    const start = Math.max(0, trail.length - TRAIL_DISPLAY);
+    const count = trail.length - start;
+
+    for (let k = 0; k < count; k++) {
+      const t = trail[start + k];
+      posAttr.array[k * 3] = t.x;
+      posAttr.array[k * 3 + 1] = t.y;
+      posAttr.array[k * 3 + 2] = t.z;
+      const alpha = (k + 1) / count;
+      colAttr.array[k * 4] = COLORS[i].r / 255;
+      colAttr.array[k * 4 + 1] = COLORS[i].g / 255;
+      colAttr.array[k * 4 + 2] = COLORS[i].b / 255;
+      colAttr.array[k * 4 + 3] = alpha * 0.7;
     }
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    geo.setDrawRange(0, count);
+  }
+}
 
-    // --- Individual gravitational force from each other body ---
-    let netAx = 0, netAy = 0;
-
-    for (let j = 0; j < bodies.length; j++) {
-      if (i === j) continue;
+function updateGravityLines() {
+  let idx = 0;
+  for (let i = 0; i < 3; i++) {
+    for (let j = i + 1; j < 3; j++) {
+      const gl = gravityLines[idx];
+      const posArr = gl.geo.attributes.position.array;
+      posArr[0] = bodies[i].x; posArr[1] = bodies[i].y; posArr[2] = bodies[i].z;
+      posArr[3] = bodies[j].x; posArr[4] = bodies[j].y; posArr[5] = bodies[j].z;
+      gl.geo.attributes.position.needsUpdate = true;
       const dx = bodies[j].x - bodies[i].x;
       const dy = bodies[j].y - bodies[i].y;
-      const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
+      const dz = bodies[j].z - bodies[i].z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      gl.mat.opacity = Math.max(0.02, Math.min(0.12, 200 / dist));
+      idx++;
+    }
+  }
+}
+
+const _tempVec = new THREE.Vector3();
+const V_SCALE = 0.6;
+const F_SCALE = 0.08;
+const A_SCALE = 12;
+const MAX_LEN = 140;
+
+function updateForceVectors() {
+  const G = 800 * G_MULT;
+
+  for (let i = 0; i < 3; i++) {
+    const origin = new THREE.Vector3(bodies[i].x, bodies[i].y, bodies[i].z);
+    const b = bodies[i];
+
+    // Velocity arrow
+    const vMag = Math.sqrt(b.vx ** 2 + b.vy ** 2 + b.vz ** 2);
+    const vLen = Math.min(vMag * V_SCALE, MAX_LEN);
+    if (vLen > 2) {
+      _tempVec.set(b.vx, b.vy, b.vz).normalize();
+      arrows[i].v.position.copy(origin);
+      arrows[i].v.setDirection(_tempVec);
+      arrows[i].v.setLength(vLen, 6, 3);
+      arrows[i].v.visible = true;
+    } else {
+      arrows[i].v.visible = false;
+    }
+
+    // Force arrows and net acceleration
+    let netAx = 0, netAy = 0, netAz = 0;
+
+    for (let j = 0; j < 3; j++) {
+      if (j === i) continue;
+      const dx = bodies[j].x - b.x;
+      const dy = bodies[j].y - b.y;
+      const dz = bodies[j].z - b.z;
+      const distSq = dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING;
       const dist = Math.sqrt(distSq);
+      const ux = dx / dist, uy = dy / dist, uz = dz / dist;
 
-      // Force vector: F = G * mi * mj / r^2, direction toward j
-      const Fmag = G * bodies[i].m * bodies[j].m / distSq;
-      const ux = dx / dist;
-      const uy = dy / dist;
-
-      // Acceleration on body i from body j: a = F / mi = G * mj / r^2
+      const Fmag = G * b.m * bodies[j].m / distSq;
       const ax = G * bodies[j].m / distSq * ux;
       const ay = G * bodies[j].m / distSq * uy;
-      netAx += ax;
-      netAy += ay;
+      const az = G * bodies[j].m / distSq * uz;
+      netAx += ax; netAy += ay; netAz += az;
 
-      // Draw force arrow (colored by attracting body j)
       const fLen = Math.min(Fmag * F_SCALE, MAX_LEN);
+      const fArrow = arrows[i].f[j];
       if (fLen > 2) {
-        const fex = cx + ux * fLen;
-        const fey = cy + uy * fLen;
-        drawArrow(cx, cy, fex, fey, COLORS[j], 0.65, 2);
-
-        // Label
-        ctx.font = '9px Courier New';
-        ctx.fillStyle = `rgba(${COLORS[j].r},${COLORS[j].g},${COLORS[j].b},0.55)`;
-        const lx = cx + ux * fLen * 0.55 + uy * 12;
-        const ly = cy + uy * fLen * 0.55 - ux * 12;
-        ctx.fillText(`F=${Fmag.toFixed(1)}`, lx, ly);
+        _tempVec.set(ux, uy, uz);
+        fArrow.position.copy(origin);
+        fArrow.setDirection(_tempVec);
+        fArrow.setLength(fLen, 6, 3);
+        fArrow.visible = true;
+      } else {
+        fArrow.visible = false;
       }
     }
 
-    // --- Net acceleration vector (yellow) ---
-    const aMag = Math.sqrt(netAx ** 2 + netAy ** 2);
+    // Net acceleration
+    const aMag = Math.sqrt(netAx ** 2 + netAy ** 2 + netAz ** 2);
     const aLen = Math.min(aMag * A_SCALE, MAX_LEN);
     if (aLen > 3) {
-      const aex = cx + (netAx / aMag) * aLen;
-      const aey = cy + (netAy / aMag) * aLen;
-      drawArrow(cx, cy, aex, aey, { r: 255, g: 230, b: 50 }, 0.85, 2.5);
-      ctx.font = 'bold 9px Courier New';
-      ctx.fillStyle = 'rgba(255,230,50,0.7)';
-      ctx.fillText('a', aex + 5, aey - 5);
+      _tempVec.set(netAx, netAy, netAz).normalize();
+      arrows[i].a.position.copy(origin);
+      arrows[i].a.setDirection(_tempVec);
+      arrows[i].a.setLength(aLen, 8, 4);
+      arrows[i].a.visible = true;
+    } else {
+      arrows[i].a.visible = false;
     }
   }
 }
 
-// --- Stars background ---
-const stars = Array.from({ length: 300 }, () => ({
-  x: Math.random(),
-  y: Math.random(),
-  r: Math.random() * 1.2 + 0.2,
-  a: Math.random() * 0.5 + 0.1,
-}));
+function updateLabels() {
+  const G = 800 * G_MULT;
+  for (let i = 0; i < 3; i++) {
+    const pos = new THREE.Vector3(bodies[i].x, bodies[i].y, bodies[i].z);
+    const radius = 4 + bodies[i].m * 4;
 
-function drawStars() {
-  for (const s of stars) {
-    ctx.beginPath();
-    ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,255,255,${s.a})`;
-    ctx.fill();
+    // Mass label
+    const offset = pos.clone();
+    offset.x += radius + 10;
+    offset.y += radius + 10;
+    const screen = worldToScreen(offset);
+    if (screen) {
+      massLabels[i].style.display = '';
+      massLabels[i].style.left = screen.x + 'px';
+      massLabels[i].style.top = screen.y + 'px';
+      massLabels[i].textContent = `m=${bodies[i].m.toFixed(1)}`;
+    } else {
+      massLabels[i].style.display = 'none';
+    }
+
+    // Velocity label
+    const vMag = Math.sqrt(bodies[i].vx ** 2 + bodies[i].vy ** 2 + bodies[i].vz ** 2);
+    const vLen = Math.min(vMag * V_SCALE, MAX_LEN);
+    const vLabel = vecLabels[i];
+    if (vLen > 2) {
+      const vEnd = pos.clone().add(new THREE.Vector3(bodies[i].vx, bodies[i].vy, bodies[i].vz).normalize().multiplyScalar(vLen));
+      const vs = worldToScreen(vEnd);
+      if (vs) {
+        vLabel.style.display = '';
+        vLabel.style.left = (vs.x + 8) + 'px';
+        vLabel.style.top = (vs.y - 8) + 'px';
+        vLabel.textContent = 'v';
+      } else { vLabel.style.display = 'none'; }
+    } else { vLabel.style.display = 'none'; }
+
+    // Net accel label
+    let netAx = 0, netAy = 0, netAz = 0;
+    for (let j = 0; j < 3; j++) {
+      if (j === i) continue;
+      const dx = bodies[j].x - bodies[i].x;
+      const dy = bodies[j].y - bodies[i].y;
+      const dz = bodies[j].z - bodies[i].z;
+      const distSq = dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING;
+      const dist = Math.sqrt(distSq);
+      const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+      netAx += G * bodies[j].m / distSq * ux;
+      netAy += G * bodies[j].m / distSq * uy;
+      netAz += G * bodies[j].m / distSq * uz;
+    }
+    const aMag = Math.sqrt(netAx ** 2 + netAy ** 2 + netAz ** 2);
+    const aLen = Math.min(aMag * A_SCALE, MAX_LEN);
+    const aLabel = vecLabels[i + 3];
+    if (aLen > 3) {
+      const aEnd = pos.clone().add(new THREE.Vector3(netAx, netAy, netAz).normalize().multiplyScalar(aLen));
+      const as = worldToScreen(aEnd);
+      if (as) {
+        aLabel.style.display = '';
+        aLabel.style.left = (as.x + 8) + 'px';
+        aLabel.style.top = (as.y - 8) + 'px';
+        aLabel.textContent = 'a';
+      } else { aLabel.style.display = 'none'; }
+    } else { aLabel.style.display = 'none'; }
+  }
+
+  // Force labels
+  let fIdx = 0;
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      if (j === i) continue;
+      const dx = bodies[j].x - bodies[i].x;
+      const dy = bodies[j].y - bodies[i].y;
+      const dz = bodies[j].z - bodies[i].z;
+      const distSq = dx * dx + dy * dy + dz * dz + SOFTENING * SOFTENING;
+      const dist = Math.sqrt(distSq);
+      const Fmag = G * bodies[i].m * bodies[j].m / distSq;
+      const fLen = Math.min(Fmag * F_SCALE, MAX_LEN);
+      const fl = forceLabels[fIdx];
+      if (fLen > 2) {
+        const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+        const mid = new THREE.Vector3(
+          bodies[i].x + ux * fLen * 0.55,
+          bodies[i].y + uy * fLen * 0.55 + 12,
+          bodies[i].z + uz * fLen * 0.55,
+        );
+        const fs = worldToScreen(mid);
+        if (fs) {
+          fl.style.display = '';
+          fl.style.left = fs.x + 'px';
+          fl.style.top = fs.y + 'px';
+          fl.textContent = `F=${Fmag.toFixed(1)}`;
+        } else { fl.style.display = 'none'; }
+      } else { fl.style.display = 'none'; }
+      fIdx++;
+    }
   }
 }
 
-// --- Main loop ---
+// --- Controls ---
 const speedSlider = document.getElementById('speed');
 const gravitySlider = document.getElementById('gravity');
 const energyDiv = document.getElementById('energy');
 const speedVal = document.getElementById('speedVal');
 const gravityVal = document.getElementById('gravityVal');
+const followCoM = document.getElementById('followCoM');
 
 let frameCount = 0;
 let speedMult = 25;
-const trailLen = 300;
 
-// Immediate slider reactions
 speedSlider.addEventListener('input', () => {
   speedMult = parseFloat(speedSlider.value);
   speedVal.textContent = speedMult.toFixed(1) + 'x';
@@ -469,25 +816,99 @@ gravitySlider.addEventListener('input', () => {
   gravityVal.textContent = G_MULT.toFixed(1);
 });
 
-let allOffScreenSince = 0;
+document.getElementById('btnPause').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('btnPause').textContent = paused ? 'Play' : 'Pause';
+});
 
-function allBodiesOffScreen() {
-  const margin = 50;
-  for (const b of bodies) {
-    const sx = b.x + W / 2;
-    const sy = b.y + H / 2;
-    if (sx >= -margin && sx <= W + margin && sy >= -margin && sy <= H + margin) return false;
+document.getElementById('btnRandomize').addEventListener('click', () => {
+  randomize();
+});
+
+document.getElementById('btnResetCam').addEventListener('click', () => {
+  camera.position.set(0, 400, 800);
+  controls.target.set(0, 0, 0);
+  controls.update();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); document.getElementById('btnPause').click(); }
+  if (e.code === 'KeyR') document.getElementById('btnRandomize').click();
+});
+
+// --- Drag interaction ---
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+const intersection = new THREE.Vector3();
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  // Test against enlarged spheres for easier picking
+  let closestDist = Infinity;
+  let closestIdx = -1;
+  for (let i = 0; i < 3; i++) {
+    const bodyPos = new THREE.Vector3(bodies[i].x, bodies[i].y, bodies[i].z);
+    const sphere = new THREE.Sphere(bodyPos, 30);
+    const ray = raycaster.ray;
+    const target = new THREE.Vector3();
+    if (ray.intersectSphere(sphere, target)) {
+      const d = target.distanceTo(camera.position);
+      if (d < closestDist) {
+        closestDist = d;
+        closestIdx = i;
+      }
+    }
   }
-  return true;
-}
 
+  if (closestIdx >= 0) {
+    dragging = closestIdx;
+    controls.enabled = false;
+    const bodyPos = new THREE.Vector3(bodies[closestIdx].x, bodies[closestIdx].y, bodies[closestIdx].z);
+    const camDir = new THREE.Vector3();
+    camera.getWorldDirection(camDir);
+    dragPlane.setFromNormalAndCoplanarPoint(camDir, bodyPos);
+  }
+});
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (dragging < 0) return;
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  raycaster.ray.intersectPlane(dragPlane, intersection);
+  if (intersection) {
+    bodies[dragging].x = intersection.x;
+    bodies[dragging].y = intersection.y;
+    bodies[dragging].z = intersection.z;
+    bodies[dragging].vx = 0;
+    bodies[dragging].vy = 0;
+    bodies[dragging].vz = 0;
+    trails[dragging] = [];
+  }
+});
+
+renderer.domElement.addEventListener('pointerup', () => {
+  if (dragging >= 0) {
+    dragging = -1;
+    controls.enabled = true;
+  }
+});
+
+renderer.domElement.addEventListener('pointerleave', () => {
+  if (dragging >= 0) {
+    dragging = -1;
+    controls.enabled = true;
+  }
+});
+
+// --- Main loop ---
 function animate() {
   requestAnimationFrame(animate);
-
-  // Background — clear fully, then draw stars fresh each frame
-  ctx.fillStyle = '#000005';
-  ctx.fillRect(0, 0, W, H);
-  drawStars();
 
   if (!paused && dragging === -1) {
     const substeps = Math.ceil(speedMult * 8);
@@ -496,38 +917,43 @@ function animate() {
       step(dt);
     }
     for (let i = 0; i < bodies.length; i++) {
-      trails[i].push({ x: bodies[i].x, y: bodies[i].y });
-      if (trails[i].length > 2000) trails[i].splice(0, trails[i].length - 2000);
+      trails[i].push({ x: bodies[i].x, y: bodies[i].y, z: bodies[i].z });
+      if (trails[i].length > MAX_TRAIL) trails[i].splice(0, trails[i].length - MAX_TRAIL);
     }
 
-    // Auto-reset if all bodies off screen for 2 seconds
+    // Auto-reset if all bodies far for 2 seconds
     const now = performance.now();
-    if (allBodiesOffScreen()) {
-      if (allOffScreenSince === 0) allOffScreenSince = now;
-      else if (now - allOffScreenSince > 2000) {
+    if (allBodiesFar()) {
+      if (allFarSince === 0) allFarSince = now;
+      else if (now - allFarSince > 2000) {
         restoreInitialState();
-        allOffScreenSince = 0;
+        updateBodyMeshes();
+        allFarSince = 0;
       }
     } else {
-      allOffScreenSince = 0;
+      allFarSince = 0;
     }
   }
 
-  // Draw
-  drawGravityLines();
-  for (let i = 0; i < bodies.length; i++) drawTrail(trails[i], COLORS[i], trailLen);
-  for (let i = 0; i < bodies.length; i++) drawBody(bodies[i], i);
-  drawForceVectors();
-
-  // Mass labels next to each body
-  for (let i = 0; i < bodies.length; i++) {
-    const bx = bodies[i].x + W / 2;
-    const by = bodies[i].y + H / 2;
-    const radius = 4 + bodies[i].m * 4;
-    ctx.font = '10px Courier New';
-    ctx.fillStyle = GLOW_COLORS[i];
-    ctx.fillText(`m=${bodies[i].m.toFixed(1)}`, bx + radius + 6, by - radius - 4);
+  // Update body positions
+  for (let i = 0; i < 3; i++) {
+    bodyGroups[i].position.set(bodies[i].x, bodies[i].y, bodies[i].z);
   }
+
+  // Follow center of mass
+  if (followCoM.checked) {
+    let cmx = 0, cmy = 0, cmz = 0, mt = 0;
+    for (const b of bodies) { cmx += b.x * b.m; cmy += b.y * b.m; cmz += b.z * b.m; mt += b.m; }
+    controls.target.set(cmx / mt, cmy / mt, cmz / mt);
+  }
+
+  updateTrails();
+  updateGravityLines();
+  updateForceVectors();
+  updateLabels();
+
+  controls.update();
+  renderer.render(scene, camera);
 
   // Energy readout
   if (frameCount % 30 === 0) {
@@ -543,50 +969,6 @@ function animate() {
 }
 
 animate();
-
-// --- Controls ---
-document.getElementById('btnPause').addEventListener('click', () => {
-  paused = !paused;
-  document.getElementById('btnPause').textContent = paused ? 'Play' : 'Pause';
-});
-
-document.getElementById('btnRandomize').addEventListener('click', () => {
-  randomize();
-  ctx.clearRect(0, 0, W, H);
-});
-
-// --- Drag interaction ---
-canvas.addEventListener('mousedown', (e) => {
-  const mx = e.clientX - W / 2;
-  const my = e.clientY - H / 2;
-  for (let i = 0; i < bodies.length; i++) {
-    const dx = bodies[i].x - mx;
-    const dy = bodies[i].y - my;
-    if (Math.sqrt(dx * dx + dy * dy) < 30) {
-      dragging = i;
-      break;
-    }
-  }
-});
-
-canvas.addEventListener('mousemove', (e) => {
-  if (dragging >= 0) {
-    bodies[dragging].x = e.clientX - W / 2;
-    bodies[dragging].y = e.clientY - H / 2;
-    bodies[dragging].vx = 0;
-    bodies[dragging].vy = 0;
-    trails[dragging] = [];
-  }
-});
-
-canvas.addEventListener('mouseup', () => { dragging = -1; });
-canvas.addEventListener('mouseleave', () => { dragging = -1; });
-
-// Keyboard
-document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') { e.preventDefault(); document.getElementById('btnPause').click(); }
-  if (e.code === 'KeyR') document.getElementById('btnRandomize').click();
-});
 </script>
 </body>
 </html>
