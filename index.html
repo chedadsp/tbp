@@ -41,8 +41,14 @@
   }
   .ctrl-row label { color: #888; }
   .ctrl-row input[type=range] {
-    width: 100px;
+    width: 90px;
     accent-color: #6af;
+  }
+  .ctrl-row .val {
+    color: #6af;
+    min-width: 36px;
+    text-align: right;
+    font-size: 11px;
   }
   button {
     background: rgba(255,255,255,0.06);
@@ -84,20 +90,17 @@
   <h1>Three-Body Problem</h1>
   <div class="ctrl-row">
     <label>Speed</label>
-    <input type="range" id="speed" min="0.1" max="5" step="0.1" value="1">
+    <input type="range" id="speed" min="0.1" max="50" step="0.1" value="1">
+    <span class="val" id="speedVal">1.0x</span>
   </div>
   <div class="ctrl-row">
-    <label>Trail Length</label>
-    <input type="range" id="trail" min="0" max="800" step="10" value="400">
-  </div>
-  <div class="ctrl-row">
-    <label>Gravity (G)</label>
+    <label>Gravity</label>
     <input type="range" id="gravity" min="0.1" max="10" step="0.1" value="1">
+    <span class="val" id="gravityVal">1.0</span>
   </div>
   <div>
-    <button id="btnReset">Reset</button>
+    <button id="btnRandomize">Randomize</button>
     <button id="btnPause">Pause</button>
-    <button id="btnPreset">Next Preset</button>
   </div>
 </div>
 
@@ -123,111 +126,83 @@ const COLORS = [
   { r: 120, g: 255, b: 160 },  // green
 ];
 const GLOW_COLORS = ['#6ab4ff', '#ff7850', '#78ffa0'];
-const SOFTENING = 20;
-const DT_BASE = 0.004;
+const SOFTENING = 8;
+const DT_BASE = 0.05;
 
-// --- Presets ---
-const PRESETS = [
-  { // Figure-8
-    name: 'Figure-8',
-    bodies: [
-      { x: -0.97000436, y:  0.24308753, vx:  0.4662036850, vy:  0.4323657300, m: 1 },
-      { x:  0.97000436, y: -0.24308753, vx:  0.4662036850, vy:  0.4323657300, m: 1 },
-      { x:  0,          y:  0,          vx: -0.9324073700, vy: -0.8647314600, m: 1 },
-    ],
-    scale: 250,
-  },
-  { // Lagrange equilateral
-    name: 'Lagrange Triangle',
-    bodies: [
-      { x:  0,    y: -1.2, vx:  0.5,  vy:  0.0, m: 1 },
-      { x:  1.04, y:  0.6, vx: -0.25, vy:  0.433, m: 1 },
-      { x: -1.04, y:  0.6, vx: -0.25, vy: -0.433, m: 1 },
-    ],
-    scale: 200,
-  },
-  { // Butterfly
-    name: 'Butterfly',
-    bodies: [
-      { x: -1, y:  0, vx:  0.30689, vy:  0.12551, m: 1 },
-      { x:  1, y:  0, vx:  0.30689, vy:  0.12551, m: 1 },
-      { x:  0, y:  0, vx: -0.61378, vy: -0.25102, m: 1 },
-    ],
-    scale: 220,
-  },
-  { // Unequal masses — chaotic
-    name: 'Chaotic (unequal)',
-    bodies: [
-      { x: -1.2, y:  0,   vx:  0.0, vy:  0.45, m: 1.5 },
-      { x:  0.8, y:  0.6, vx: -0.3, vy: -0.2, m: 1.0 },
-      { x:  0.4, y: -0.8, vx:  0.3, vy: -0.25, m: 0.8 },
-    ],
-    scale: 200,
-  },
-  { // Broucke orbit
-    name: 'Broucke',
-    bodies: [
-      { x: -0.9892620043, y: 0, vx: 0, vy: -1.2246444985, m: 1 },
-      { x:  2.2096177241, y: 0, vx: 0, vy: -0.5765405586, m: 1 },
-      { x: -1.2203557197, y: 0, vx: 0, vy:  1.8011850571, m: 1 },
-    ],
-    scale: 140,
-  },
-];
-
-let presetIdx = 0;
 let bodies = [];
 let trails = [];
 let paused = false;
 let dragging = -1;
 let G_MULT = 1;
-
-function loadPreset(idx) {
-  const p = PRESETS[idx % PRESETS.length];
-  bodies = p.bodies.map(b => ({
-    x: b.x * p.scale,
-    y: b.y * p.scale,
-    vx: b.vx * p.scale,
-    vy: b.vy * p.scale,
-    m: b.m,
-  }));
-  trails = [[], [], []];
-  currentLabel = p.name;
-}
+let currentLabel = '';
 
 function randomize() {
+  const G = 800;
   const spread = 200;
-  const vSpread = 120;
-  // Random masses between 0.4 and 2.5
+  // Random masses between 0.5 and 3.0
   const masses = [
-    0.4 + Math.random() * 2.1,
-    0.4 + Math.random() * 2.1,
-    0.4 + Math.random() * 2.1,
+    0.5 + Math.random() * 2.5,
+    0.5 + Math.random() * 2.5,
+    0.5 + Math.random() * 2.5,
   ];
+  const mTotal = masses[0] + masses[1] + masses[2];
+
+  // Place bodies at random positions, ensure minimum separation
   bodies = [];
   for (let i = 0; i < 3; i++) {
-    bodies.push({
-      x: (Math.random() - 0.5) * spread * 2,
-      y: (Math.random() - 0.5) * spread * 2,
-      vx: (Math.random() - 0.5) * vSpread * 2,
-      vy: (Math.random() - 0.5) * vSpread * 2,
-      m: masses[i],
-    });
+    let x, y, tooClose;
+    do {
+      x = (Math.random() - 0.5) * spread * 2;
+      y = (Math.random() - 0.5) * spread * 2;
+      tooClose = false;
+      for (let k = 0; k < bodies.length; k++) {
+        const d = Math.sqrt((x - bodies[k].x) ** 2 + (y - bodies[k].y) ** 2);
+        if (d < 60) { tooClose = true; break; }
+      }
+    } while (tooClose);
+    bodies.push({ x, y, vx: 0, vy: 0, m: masses[i] });
   }
-  // Zero out net momentum so system doesn't drift off-screen
-  let px = 0, py = 0, mTotal = 0;
-  for (const b of bodies) { px += b.vx * b.m; py += b.vy * b.m; mTotal += b.m; }
-  for (const b of bodies) { b.vx -= px / mTotal; b.vy -= py / mTotal; }
+
   // Center of mass at origin
-  let cx = 0, cy = 0;
-  for (const b of bodies) { cx += b.x * b.m; cy += b.y * b.m; }
-  for (const b of bodies) { b.x -= cx / mTotal; b.y -= cy / mTotal; }
+  let cmx = 0, cmy = 0;
+  for (const b of bodies) { cmx += b.x * b.m; cmy += b.y * b.m; }
+  for (const b of bodies) { b.x -= cmx / mTotal; b.y -= cmy / mTotal; }
+
+  // Give each body an orbital-scale velocity (tangential to center of mass)
+  // v_orbital ~ sqrt(G * M_other / r) — ensures gravitationally bound curved orbits
+  for (let i = 0; i < 3; i++) {
+    const r = Math.sqrt(bodies[i].x ** 2 + bodies[i].y ** 2) || 1;
+    const otherMass = mTotal - bodies[i].m;
+    const vOrbit = Math.sqrt(G * otherMass / r);
+    // Tangential direction (perpendicular to radius) + radial perturbation
+    const angle = Math.atan2(bodies[i].y, bodies[i].x) + Math.PI / 2;
+    // Guarantee non-zero: minimum 40% of orbital speed
+    const speed = vOrbit * (0.4 + Math.random() * 0.6);
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    bodies[i].vx = sign * Math.cos(angle) * speed + (Math.random() - 0.5) * vOrbit * 0.3;
+    bodies[i].vy = sign * Math.sin(angle) * speed + (Math.random() - 0.5) * vOrbit * 0.3;
+  }
+
+  // Ensure every body has non-zero velocity (safety net)
+  for (const b of bodies) {
+    const v = Math.sqrt(b.vx ** 2 + b.vy ** 2);
+    if (v < 1) {
+      const a = Math.random() * Math.PI * 2;
+      b.vx = Math.cos(a) * 5;
+      b.vy = Math.sin(a) * 5;
+    }
+  }
+
+  // Zero net momentum so system stays centered
+  let px = 0, py = 0;
+  for (const b of bodies) { px += b.vx * b.m; py += b.vy * b.m; }
+  for (const b of bodies) { b.vx -= px / mTotal; b.vy -= py / mTotal; }
+
   trails = [[], [], []];
-  currentLabel = `Random (m: ${masses.map(m => m.toFixed(1)).join(', ')})`;
+  currentLabel = `m: ${masses.map(m => m.toFixed(1)).join(', ')}`;
 }
 
-let currentLabel = '';
-loadPreset(0);
+randomize();
 
 // --- Physics (Velocity Verlet) ---
 function computeAccelerations(bods) {
@@ -345,15 +320,55 @@ function drawGravityLines() {
   }
 }
 
-// Draw individual force vectors from each other body
+function drawArrow(x1, y1, x2, y2, color, alpha, width) {
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${alpha})`;
+  ctx.lineWidth = width;
+  ctx.stroke();
+  // Arrowhead
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 4) return;
+  const headLen = Math.min(10, len * 0.35);
+  const angle = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - headLen * Math.cos(angle - 0.45), y2 - headLen * Math.sin(angle - 0.45));
+  ctx.lineTo(x2 - headLen * Math.cos(angle + 0.45), y2 - headLen * Math.sin(angle + 0.45));
+  ctx.closePath();
+  ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${alpha})`;
+  ctx.fill();
+}
+
+// Draw per-body: velocity vector, individual force from each other body, net acceleration
 function drawForceVectors() {
   const G = 800 * G_MULT;
-  const ARROW_SCALE = 0.0004; // scale force magnitude to pixel length
-  const MAX_ARROW = 120;
+  const F_SCALE = 0.08;  // force to pixels
+  const A_SCALE = 12;    // acceleration to pixels
+  const V_SCALE = 0.6;   // velocity to pixels
+  const MAX_LEN = 140;
 
   for (let i = 0; i < bodies.length; i++) {
     const cx = bodies[i].x + W / 2;
     const cy = bodies[i].y + H / 2;
+    const radius = 4 + bodies[i].m * 4;
+
+    // --- Velocity vector (white, dashed-style) ---
+    const vLen = Math.min(Math.sqrt(bodies[i].vx ** 2 + bodies[i].vy ** 2) * V_SCALE, MAX_LEN);
+    if (vLen > 2) {
+      const vNorm = Math.sqrt(bodies[i].vx ** 2 + bodies[i].vy ** 2) || 1;
+      const vex = cx + (bodies[i].vx / vNorm) * vLen;
+      const vey = cy + (bodies[i].vy / vNorm) * vLen;
+      drawArrow(cx, cy, vex, vey, { r: 255, g: 255, b: 255 }, 0.35, 1.5);
+      ctx.font = '9px Courier New';
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillText('v', vex + 4, vey - 4);
+    }
+
+    // --- Individual gravitational force from each other body ---
+    let netAx = 0, netAy = 0;
 
     for (let j = 0; j < bodies.length; j++) {
       if (i === j) continue;
@@ -361,47 +376,44 @@ function drawForceVectors() {
       const dy = bodies[j].y - bodies[i].y;
       const distSq = dx * dx + dy * dy + SOFTENING * SOFTENING;
       const dist = Math.sqrt(distSq);
-      const Fmag = G * bodies[i].m * bodies[j].m / distSq;
 
-      // Direction unit vector
+      // Force vector: F = G * mi * mj / r^2, direction toward j
+      const Fmag = G * bodies[i].m * bodies[j].m / distSq;
       const ux = dx / dist;
       const uy = dy / dist;
 
-      // Arrow length (clamped)
-      const len = Math.min(Fmag * ARROW_SCALE, MAX_ARROW);
-      const ex = cx + ux * len;
-      const ey = cy + uy * len;
+      // Acceleration on body i from body j: a = F / mi = G * mj / r^2
+      const ax = G * bodies[j].m / distSq * ux;
+      const ay = G * bodies[j].m / distSq * uy;
+      netAx += ax;
+      netAy += ay;
 
-      // Arrow color matches the body that is *attracting* (source j)
-      const c = COLORS[j];
-      const alpha = 0.7;
+      // Draw force arrow (colored by attracting body j)
+      const fLen = Math.min(Fmag * F_SCALE, MAX_LEN);
+      if (fLen > 2) {
+        const fex = cx + ux * fLen;
+        const fey = cy + uy * fLen;
+        drawArrow(cx, cy, fex, fey, COLORS[j], 0.65, 2);
 
-      // Shaft
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(ex, ey);
-      ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${alpha})`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
+        // Label
+        ctx.font = '9px Courier New';
+        ctx.fillStyle = `rgba(${COLORS[j].r},${COLORS[j].g},${COLORS[j].b},0.55)`;
+        const lx = cx + ux * fLen * 0.55 + uy * 12;
+        const ly = cy + uy * fLen * 0.55 - ux * 12;
+        ctx.fillText(`F=${Fmag.toFixed(1)}`, lx, ly);
+      }
+    }
 
-      // Arrowhead
-      const headLen = Math.min(10, len * 0.35);
-      const angle = Math.atan2(ey - cy, ex - cx);
-      ctx.beginPath();
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - headLen * Math.cos(angle - 0.4), ey - headLen * Math.sin(angle - 0.4));
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - headLen * Math.cos(angle + 0.4), ey - headLen * Math.sin(angle + 0.4));
-      ctx.strokeStyle = `rgba(${c.r},${c.g},${c.b},${alpha})`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Force magnitude label
-      ctx.font = '9px Courier New';
-      ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},0.6)`;
-      const lx = cx + ux * len * 0.5 + uy * 10;
-      const ly = cy + uy * len * 0.5 - ux * 10;
-      ctx.fillText(`F=${Fmag.toFixed(0)}`, lx, ly);
+    // --- Net acceleration vector (yellow) ---
+    const aMag = Math.sqrt(netAx ** 2 + netAy ** 2);
+    const aLen = Math.min(aMag * A_SCALE, MAX_LEN);
+    if (aLen > 3) {
+      const aex = cx + (netAx / aMag) * aLen;
+      const aey = cy + (netAy / aMag) * aLen;
+      drawArrow(cx, cy, aex, aey, { r: 255, g: 230, b: 50 }, 0.85, 2.5);
+      ctx.font = 'bold 9px Courier New';
+      ctx.fillStyle = 'rgba(255,230,50,0.7)';
+      ctx.fillText('a', aex + 5, aey - 5);
     }
   }
 }
@@ -425,30 +437,36 @@ function drawStars() {
 
 // --- Main loop ---
 const speedSlider = document.getElementById('speed');
-const trailSlider = document.getElementById('trail');
 const gravitySlider = document.getElementById('gravity');
 const energyDiv = document.getElementById('energy');
+const speedVal = document.getElementById('speedVal');
+const gravityVal = document.getElementById('gravityVal');
 
 let frameCount = 0;
+let speedMult = 1;
+const trailLen = 300;
+
+// Immediate slider reactions
+speedSlider.addEventListener('input', () => {
+  speedMult = parseFloat(speedSlider.value);
+  speedVal.textContent = speedMult.toFixed(1) + 'x';
+});
+
+gravitySlider.addEventListener('input', () => {
+  G_MULT = parseFloat(gravitySlider.value);
+  gravityVal.textContent = G_MULT.toFixed(1);
+});
 
 function animate() {
   requestAnimationFrame(animate);
 
-  const speedMult = parseFloat(speedSlider.value);
-  const trailLen = parseInt(trailSlider.value);
-  G_MULT = parseFloat(gravitySlider.value);
-
-  // Background
-  ctx.fillStyle = 'rgba(0, 0, 5, 0.15)';
+  // Background — clear fully, then draw stars fresh each frame
+  ctx.fillStyle = '#000005';
   ctx.fillRect(0, 0, W, H);
-  if (frameCount % 60 === 0) {
-    ctx.fillStyle = '#000005';
-    ctx.fillRect(0, 0, W, H);
-    drawStars();
-  }
+  drawStars();
 
   if (!paused && dragging === -1) {
-    const substeps = Math.ceil(speedMult * 4);
+    const substeps = Math.ceil(speedMult * 8);
     const dt = DT_BASE * speedMult / substeps;
     for (let s = 0; s < substeps; s++) {
       step(dt);
@@ -496,14 +514,8 @@ document.getElementById('btnPause').addEventListener('click', () => {
   document.getElementById('btnPause').textContent = paused ? 'Play' : 'Pause';
 });
 
-document.getElementById('btnReset').addEventListener('click', () => {
+document.getElementById('btnRandomize').addEventListener('click', () => {
   randomize();
-  ctx.clearRect(0, 0, W, H);
-});
-
-document.getElementById('btnPreset').addEventListener('click', () => {
-  presetIdx++;
-  loadPreset(presetIdx);
   ctx.clearRect(0, 0, W, H);
 });
 
@@ -537,8 +549,7 @@ canvas.addEventListener('mouseleave', () => { dragging = -1; });
 // Keyboard
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); document.getElementById('btnPause').click(); }
-  if (e.code === 'KeyR') document.getElementById('btnReset').click();
-  if (e.code === 'KeyN') document.getElementById('btnPreset').click();
+  if (e.code === 'KeyR') document.getElementById('btnRandomize').click();
 });
 </script>
 </body>
