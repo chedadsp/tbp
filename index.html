@@ -90,12 +90,12 @@
   <h1>Three-Body Problem</h1>
   <div class="ctrl-row">
     <label>Speed</label>
-    <input type="range" id="speed" min="0.1" max="50" step="0.1" value="1">
-    <span class="val" id="speedVal">1.0x</span>
+    <input type="range" id="speed" min="0.1" max="50" step="0.1" value="25">
+    <span class="val" id="speedVal">25.0x</span>
   </div>
   <div class="ctrl-row">
     <label>Gravity</label>
-    <input type="range" id="gravity" min="0.1" max="10" step="0.1" value="1">
+    <input type="range" id="gravity" min="0.1" max="10" step="0.1" value="1.0">
     <span class="val" id="gravityVal">1.0</span>
   </div>
   <div>
@@ -135,6 +135,17 @@ let paused = false;
 let dragging = -1;
 let G_MULT = 1;
 let currentLabel = '';
+let initialState = null;
+
+function saveInitialState() {
+  initialState = bodies.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, m: b.m }));
+}
+
+function restoreInitialState() {
+  if (!initialState) return;
+  bodies = initialState.map(b => ({ ...b }));
+  trails = [[], [], []];
+}
 
 function randomize() {
   const G = 800;
@@ -200,6 +211,7 @@ function randomize() {
 
   trails = [[], [], []];
   currentLabel = `m: ${masses.map(m => m.toFixed(1)).join(', ')}`;
+  saveInitialState();
 }
 
 randomize();
@@ -443,7 +455,7 @@ const speedVal = document.getElementById('speedVal');
 const gravityVal = document.getElementById('gravityVal');
 
 let frameCount = 0;
-let speedMult = 1;
+let speedMult = 25;
 const trailLen = 300;
 
 // Immediate slider reactions
@@ -456,6 +468,18 @@ gravitySlider.addEventListener('input', () => {
   G_MULT = parseFloat(gravitySlider.value);
   gravityVal.textContent = G_MULT.toFixed(1);
 });
+
+let allOffScreenSince = 0;
+
+function allBodiesOffScreen() {
+  const margin = 50;
+  for (const b of bodies) {
+    const sx = b.x + W / 2;
+    const sy = b.y + H / 2;
+    if (sx >= -margin && sx <= W + margin && sy >= -margin && sy <= H + margin) return false;
+  }
+  return true;
+}
 
 function animate() {
   requestAnimationFrame(animate);
@@ -474,6 +498,18 @@ function animate() {
     for (let i = 0; i < bodies.length; i++) {
       trails[i].push({ x: bodies[i].x, y: bodies[i].y });
       if (trails[i].length > 2000) trails[i].splice(0, trails[i].length - 2000);
+    }
+
+    // Auto-reset if all bodies off screen for 2 seconds
+    const now = performance.now();
+    if (allBodiesOffScreen()) {
+      if (allOffScreenSince === 0) allOffScreenSince = now;
+      else if (now - allOffScreenSince > 2000) {
+        restoreInitialState();
+        allOffScreenSince = 0;
+      }
+    } else {
+      allOffScreenSince = 0;
     }
   }
 
